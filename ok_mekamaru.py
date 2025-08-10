@@ -15,7 +15,11 @@ def open_shibuya_live(close_first=True):
             ok = launch_chromium_single(url)
             if ok:
                 _log(f"[INFO] 渋谷ライブカメラ起動: {url}")
-                respond("渋谷スクランブル交差点のライブ映像を表示します。")
+                shibuya_wav = os.path.join(VOICES_DIR, "shibuya.wav")
+                if os.path.exists(shibuya_wav):
+                    play_wav(shibuya_wav, label="渋谷ライブ")
+                else:
+                    respond("渋谷スクランブル交差点のライブ映像を表示します。")
                 return True
         except Exception as e:
             _log(f"[INFO] 渋谷ライブカメラ起動失敗: {e}")
