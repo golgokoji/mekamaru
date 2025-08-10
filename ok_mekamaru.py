@@ -48,7 +48,6 @@ import webrtcvad
 import google.generativeai as genai
 from google.cloud import texttospeech, speech_v2 as speech
 
-# ====== 基本設定 ======
 HOME = os.path.expanduser("~")
 VOICES_DIR = os.path.join(HOME, "voices")
 START_WAV = os.path.join(VOICES_DIR, "start.wav")
@@ -58,9 +57,14 @@ RATE = 16000
 SAMPLE_WIDTH = 2
 FRAME_MS = 20
 CHUNK_SEC = float(os.getenv("MEKAMARU_CHUNK_SEC", "0.4"))
+# VAD/STT関連の環境変数（既定値で上書き可能）
 VAD_MODE = int(os.getenv("MEKAMARU_VAD_MODE", "2"))
 VAD_START_MS = int(os.getenv("MEKAMARU_VAD_START_MS", "200"))
 VAD_END_MS   = int(os.getenv("MEKAMARU_VAD_END_MS", "500"))
+VAD_SILENCE_MS = int(os.getenv("MEKAMARU_VAD_SILENCE_MS", "800"))
+MAX_UTTER_SEC = int(os.getenv("MEKAMARU_MAX_UTTER_SEC", "15"))
+SEG_BRIDGING_MS = int(os.getenv("MEKAMARU_SEG_BRIDGING_MS", "300"))
+STT_SINGLE_UTTERANCE = int(os.getenv("MEKAMARU_STT_SINGLE_UTTERANCE", "1"))
 
 SRC = os.getenv("MEKAMARU_SOURCE", None)
 
@@ -200,10 +204,13 @@ def pcm_to_frames(pcm: bytes, frame_ms=20) -> List[bytes]:
 class Segmenter:
     # VAD（無音区間検出）で有声区間のみ抽出するクラス。
     # consume_framesで音声フレームを渡すと有声区間ごとに分割して返す。
-    def __init__(self, vad_mode=VAD_MODE, start_ms=VAD_START_MS, end_ms=VAD_END_MS):
+    def __init__(self, vad_mode=VAD_MODE, start_ms=VAD_START_MS, end_ms=VAD_END_MS, silence_ms=VAD_SILENCE_MS, bridging_ms=SEG_BRIDGING_MS):
         self.vad = webrtcvad.Vad(vad_mode)
         self.start_need = start_ms
         self.end_need   = end_ms
+        self.silence_ms = silence_ms
+        self.bridging_ms = bridging_ms
+        self.hangover_frames = int(self.silence_ms / FRAME_MS)
         self.state = "idle"
         self.buf = bytearray()
         self.run_ms = 0
@@ -587,34 +594,35 @@ def main():
     # Ctrl+Cで終了。
     if not play_wav(START_WAV, label="起動音"):
         respond("起動しました。マイクを待機します。")
-    seg = Segmenter()
+    seg = Segmenter(vad_mode=VAD_MODE, start_ms=VAD_START_MS, end_ms=VAD_END_MS, silence_ms=VAD_SILENCE_MS, bridging_ms=SEG_BRIDGING_MS)
     _log("[OKメカ丸] 常時リスニング開始（VADで有声区間のみ送信）")
     try:
         while True:
             tmp = "/tmp/chunk.wav"
             if not record_chunk_wav(tmp, CHUNK_SEC):
-                continue
-            pcm = read_wav_pcm(tmp)
-            frames = pcm_to_frames(pcm)
-            segments = seg.consume_frames(frames)
-            for s_pcm in segments:
-                text = stt_from_pcm_google(s_pcm)
-                _log(f"[SEG STT] {text}")
-                if not text:
-                    continue
-
-                # 1) OK不要の直命令（ラッキーマイン等）
-                if handle_custom_commands(text):
-                    continue
-
-                # 2) 計算はAIを介さず即答（OK不要・通常発話でも発火）
-                calc = try_calc_result(text)
-                if calc:
-                    respond(calc)
-                    continue
-
-                # 3) 従来どおり OK 判定 → “OK以降” を処理
-                trig, rest = extract_after_ok(text)
+                try:
+                    client = speech.SpeechClient()
+                    with open(tmp,"rb") as f: content = f.read()
+                    cfg = {
+                        "auto_decoding_config": {},
+                        "language_codes": ["ja-JP"],
+                        "model": "latest_short",
+                        "features": {"enable_automatic_punctuation": True},
+                        "single_utterance": bool(STT_SINGLE_UTTERANCE),
+                    }
+                    req = speech.RecognizeRequest(
+                        recognizer=_recognizer_path(),
+                        config=cfg,
+                        content=content,
+                    )
+                    resp = client.recognize(request=req)
+                    cand = []
+                    for r in resp.results:
+                        if r.alternatives: cand.append(r.alternatives[0].transcript)
+                    return " ".join(cand).strip()
+                except Exception as e:
+                    _log(f"[STT v2 ERROR] {e}")
+                    return ""
                 if not trig:
                     _log("[INFO] トリガー外")
                     continue
