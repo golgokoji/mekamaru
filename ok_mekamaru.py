@@ -223,17 +223,33 @@ def respond(text: str):
     if not say_jp(s): _log(f"[ERROR] 音声出力失敗: {s}")
 
 # ====== 録音（小刻み） ======
-def record_chunk_wav(path: str, seconds: float) -> bool:
-    # 指定秒数だけマイクから録音しwavファイルに保存。
-    # 成功でTrue、失敗でFalse。
+def record_chunk_wav(path: str, seconds: float, retry: int = 3) -> bool:
+    """
+    指定秒数だけマイクから録音しwavファイルに保存。
+    録音ごとにpw-recordプロセスを確実に終了・解放。
+    Bluetoothマイク（AirPods）利用時は録音前後に遅延・再接続を挟む。
+    録音失敗時は最大retry回リトライ。
+    """
     if not SRC:
         _log("[ERROR] MEKAMARU_SOURCE 未設定"); return False
     if not shutil.which("pw-record"):
         _log("[ERROR] pw-record 不在"); return False
-    cmd = ["pw-record","--rate",str(RATE),"--channels","1","--target",SRC,path]
-    r = subprocess.run(["bash","-lc", f"timeout {seconds}s " + " ".join(cmd)],
-                       capture_output=True, text=True)
-    return (r.returncode in (0,124)) and os.path.exists(path) and (os.path.getsize(path) > 44)
+    for attempt in range(retry):
+        # 録音前にBluetoothマイク再接続（必要なら）
+        if "bluez_input" in SRC:
+            subprocess.run(["pactl", "set-source-port", SRC, "analog-input-mic"], check=False)
+            time.sleep(0.5)
+        cmd = ["pw-record","--rate",str(RATE),"--channels","1","--target",SRC,path]
+        r = subprocess.run(["bash","-lc", f"timeout {seconds}s " + " ".join(cmd)],
+                           capture_output=True, text=True)
+        # 録音後にプロセス解放（Bluetoothマイク用）
+        subprocess.run(["pkill", "-f", "pw-record"], check=False)
+        time.sleep(0.2)
+        if (r.returncode in (0,124)) and os.path.exists(path) and (os.path.getsize(path) > 44):
+            return True
+        _log(f"[WARN] 録音失敗（{attempt+1}回目）: {r.stderr.strip()}")
+        time.sleep(0.5)
+    return False
 
 def read_wav_pcm(path: str) -> bytes:
     # wavファイルからPCMデータを抽出して返す。
@@ -480,17 +496,33 @@ def respond(text: str):
     if not say_jp(s): _log(f"[ERROR] 音声出力失敗: {s}")
 
 # ====== 録音（小刻み） ======
-def record_chunk_wav(path: str, seconds: float) -> bool:
-    # 指定秒数だけマイクから録音しwavファイルに保存。
-    # 成功でTrue、失敗でFalse。
+def record_chunk_wav(path: str, seconds: float, retry: int = 3) -> bool:
+    """
+    指定秒数だけマイクから録音しwavファイルに保存。
+    録音ごとにpw-recordプロセスを確実に終了・解放。
+    Bluetoothマイク（AirPods）利用時は録音前後に遅延・再接続を挟む。
+    録音失敗時は最大retry回リトライ。
+    """
     if not SRC:
         _log("[ERROR] MEKAMARU_SOURCE 未設定"); return False
     if not shutil.which("pw-record"):
         _log("[ERROR] pw-record 不在"); return False
-    cmd = ["pw-record","--rate",str(RATE),"--channels","1","--target",SRC,path]
-    r = subprocess.run(["bash","-lc", f"timeout {seconds}s " + " ".join(cmd)],
-                       capture_output=True, text=True)
-    return (r.returncode in (0,124)) and os.path.exists(path) and (os.path.getsize(path) > 44)
+    for attempt in range(retry):
+        # 録音前にBluetoothマイク再接続（必要なら）
+        if "bluez_input" in SRC:
+            subprocess.run(["pactl", "set-source-port", SRC, "analog-input-mic"], check=False)
+            time.sleep(0.5)
+        cmd = ["pw-record","--rate",str(RATE),"--channels","1","--target",SRC,path]
+        r = subprocess.run(["bash","-lc", f"timeout {seconds}s " + " ".join(cmd)],
+                           capture_output=True, text=True)
+        # 録音後にプロセス解放（Bluetoothマイク用）
+        subprocess.run(["pkill", "-f", "pw-record"], check=False)
+        time.sleep(0.2)
+        if (r.returncode in (0,124)) and os.path.exists(path) and (os.path.getsize(path) > 44):
+            return True
+        _log(f"[WARN] 録音失敗（{attempt+1}回目）: {r.stderr.strip()}")
+        time.sleep(0.5)
+    return False
 
 def read_wav_pcm(path: str) -> bytes:
     # wavファイルからPCMデータを抽出して返す。
