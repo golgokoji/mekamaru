@@ -6,6 +6,7 @@ SHIBUYA_LIVE_URLS = [
     "https://www.youtube.com/results?search_query=渋谷+スクランブル+交差点+ライブ"  # YouTube検索
 ]
 
+
 def open_shibuya_live(close_first=True):
     # 渋谷スクランブル交差点ライブカメラを順に起動
     if close_first:
