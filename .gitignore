@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets / ローカル生成物
+.env
+.DS_Store
+Thumbs.db
+out.*
+*.log
+
+# 生成物・大きめファイル（必要ならあとで外してください）
+*.wav
+*.mp3
+
+# Chromium のプロファイル
+.mekamaru-chrome/
+
+# 大型イメージ等（強推奨：コミットしない）
+*.img
+mekamaru-os
