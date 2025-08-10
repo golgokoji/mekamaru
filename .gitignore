@@ -11,8 +11,8 @@ out.*
 *.log
 
 # 生成物・大きめファイル（必要ならあとで外してください）
-*.wav
-*.mp3
+.wav
+.mp3
 
 # Chromium のプロファイル
 .mekamaru-chrome/

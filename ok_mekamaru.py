@@ -1,3 +1,26 @@
+# ====== 渋谷ライブカメラ表示 ======
+SHIBUYA_LIVE_URLS = [
+    "https://www.youtube.com/watch?v=tujkoXI8rWM&autoplay=1&mute=1",  # ANN公式
+    "https://www.youtube.com/channel/UCWs8rt4ofGmdV4N6KQpP10Q/live?autoplay=1&mute=1",  # SHIBUYA SKY
+    "https://www.skylinewebcams.com/en/webcam/japan/kanto/tokyo/tokyo-shibuya-scramble-crossing.html",  # SkylineWebcams
+    "https://www.youtube.com/results?search_query=渋谷+スクランブル+交差点+ライブ"  # YouTube検索
+]
+
+def open_shibuya_live(close_first=True):
+    # 渋谷スクランブル交差点ライブカメラを順に起動
+    if close_first:
+        close_browser()
+    for url in SHIBUYA_LIVE_URLS:
+        try:
+            ok = launch_chromium_single(url)
+            if ok:
+                _log(f"[INFO] 渋谷ライブカメラ起動: {url}")
+                respond("渋谷スクランブル交差点のライブ映像を表示します。")
+                return True
+        except Exception as e:
+            _log(f"[INFO] 渋谷ライブカメラ起動失敗: {e}")
+    respond("申し訳ありません。渋谷ライブ映像を表示できませんでした。")
+    return False
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # OKメカ丸 v7.5
@@ -503,6 +526,16 @@ def handle_custom_commands(text: str) -> bool:
     # 該当すればTrue、そうでなければFalse。
     # 空白・記号を除去して判定
     t = re.sub(r"[\s\u3000、。,.　:：!！?？「」『』()（）\-—–]", "", (text or ""))
+    # 渋谷ライブカメラ表示コマンド語彙
+    SHIBUYA_LIVE_WORDS = [
+        "渋谷の状況", "渋谷の様子", "渋谷ライブ", "渋谷の定点", "渋谷スクランブル見せて",
+        "渋谷スクランブル", "渋谷交差点", "渋谷ライブカメラ", "渋谷定点", "渋谷カメラ"
+    ]
+    for w in SHIBUYA_LIVE_WORDS:
+        if w.replace(" ","") in t:
+            _log("[CMD] 渋谷ライブカメラ命令検知")
+            open_shibuya_live(close_first=True)
+            return True
     # 「例の」「レイの」「レイノ」などにも反応
     if re.search(r"(okメカ丸.*例のものを|例のもの|れいのもの|例の|レイの|レイノ)", t, re.IGNORECASE):
         _log("[CMD] 例のものを再生命令検知")
