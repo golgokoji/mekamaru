@@ -45,9 +45,59 @@ def open_shibuya_live(close_first=True):
 
 import os, sys, time, wave, struct, shutil, unicodedata, subprocess, difflib, re, signal
 from typing import Tuple, List
+import logging
 import webrtcvad
 import google.generativeai as genai
-from google.cloud import texttospeech, speech_v2 as speech
+from google.cloud import texttospeech
+
+# STT APIバージョン切り替え
+API_VER = os.getenv("MEKAMARU_STT_API", "v1").lower()  # v1 / v2
+logging.basicConfig(level=logging.INFO)
+
+# VAD/STT関連の環境変数（既定値で上書き可能）
+VAD_MODE = int(os.getenv("MEKAMARU_VAD_MODE", "2"))
+VAD_START_MS = int(os.getenv("MEKAMARU_VAD_START_MS", "200"))
+VAD_END_MS   = int(os.getenv("MEKAMARU_VAD_END_MS", "500"))
+VAD_SILENCE_MS = int(os.getenv("MEKAMARU_VAD_SILENCE_MS", "800"))
+MAX_UTTER_SEC = int(os.getenv("MEKAMARU_MAX_UTTER_SEC", "15"))
+SEG_BRIDGING_MS = int(os.getenv("MEKAMARU_SEG_BRIDGING_MS", "300"))
+# single_utteranceの判定（文字列で柔軟に）
+SINGLE_UTTER = os.getenv("MEKAMARU_STT_SINGLE_UTTERANCE", "1") not in ("0","false","no","off")
+
+# STT APIバージョンごとの設定
+if API_VER == "v1":
+    from google.cloud import speech_v1 as speech
+    config = speech.RecognitionConfig(
+        encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+        sample_rate_hertz=16000,
+        language_code="ja-JP",
+        enable_automatic_punctuation=True,
+    )
+    # v1はStreamingRecognitionConfigにsingle_utteranceを指定
+    streaming_config = speech.StreamingRecognitionConfig(
+        config=config,
+        interim_results=True,
+        single_utterance=SINGLE_UTTER,
+    )
+else:
+    from google.cloud import speech_v2 as speech
+    config = speech.RecognitionConfig(
+        auto_decoding_config=speech.AutoDetectDecodingConfig(),
+        language_codes=["ja-JP"],
+        model="latest_short",
+        features=speech.RecognitionFeatures(
+            enable_automatic_punctuation=True,
+        ),
+    )
+    # v2はsingle_utteranceを指定しない。必要ならVoiceActivityTimeoutで制御
+    streaming_config = speech.StreamingRecognitionConfig(
+        config=config,
+        voice_activity_timeout=speech.VoiceActivityTimeout(
+            speech_start_timeout={"seconds": 5},
+            speech_end_timeout={"seconds": 1},
+        ),
+    )
+logging.info("STT API = %s, single_utter=%s", API_VER, SINGLE_UTTER)
 
 HOME = os.path.expanduser("~")
 VOICES_DIR = os.path.join(HOME, "voices")
