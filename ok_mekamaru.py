@@ -301,6 +301,263 @@ def write_wav_from_pcm(path: str, pcm: bytes):
         wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(RATE)
         wf.writeframes(pcm)
 
+# ====== STT（v1/v2ディスパッチ） ======
+def _recognizer_path() -> str:
+    if not GC_PROJECT_NUMBER:
+        raise RuntimeError("MEKAMARU_GC_PROJECT_NUMBER が未設定です。")
+    return f"projects/{GC_PROJECT_NUMBER}/locations/{GC_LOCATION}/recognizers/_"
+
+def stt_from_pcm_google_v2(pcm: bytes) -> str:
+    tmp = "/tmp/seg.wav"
+    write_wav_from_pcm(tmp, pcm)
+    try:
+        client = speech.SpeechClient()
+        with open(tmp,"rb") as f: content = f.read()
+        cfg = {
+            "auto_decoding_config": {},
+            "language_codes": ["ja-JP"],
+            "model": "latest_short",
+            "features": {"enable_automatic_punctuation": True},
+        }
+        req = speech.RecognizeRequest(
+            recognizer=_recognizer_path(),
+            config=cfg,
+            content=content,
+        )
+        resp = client.recognize(request=req)
+        cand = []
+        for r in resp.results:
+            if r.alternatives: cand.append(r.alternatives[0].transcript)
+        return " ".join(cand).strip()
+    except Exception as e:
+        _log(f"[STT v2 ERROR] {e}")
+        return ""
+
+def stt_from_pcm_google_v1(pcm: bytes) -> str:
+    try:
+        from google.cloud import speech_v1 as speech
+        client = speech.SpeechClient()
+        audio = speech.RecognitionAudio(content=pcm)
+        config = speech.RecognitionConfig(
+            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+            sample_rate_hertz=16000,
+            language_code="ja-JP",
+            enable_automatic_punctuation=True,
+        )
+        resp = client.recognize(config=config, audio=audio)
+        cand = []
+        for r in resp.results:
+            if r.alternatives: cand.append(r.alternatives[0].transcript)
+        return " ".join(cand).strip()
+    except Exception as e:
+        _log(f"[STT v1 ERROR] {e}")
+        return ""
+
+def stt_from_pcm(pcm: bytes) -> str:
+    return stt_from_pcm_google_v2(pcm) if API_VER == "v2" else stt_from_pcm_google_v1(pcm)
+
+# ====== ソース自動検出（保険） ======
+def _detect_source() -> str:
+    try:
+        out = subprocess.run(
+            ["bash","-lc","pactl list short sources"],
+            capture_output=True, text=True, timeout=3
+        )
+        lines = (out.stdout or "").splitlines()
+        for pref in ("bluez_input", "alsa_input"):
+            for ln in lines:
+                if pref in ln:
+                    parts = ln.split()
+                    if len(parts) >= 2:
+                        return parts[1]
+    except Exception:
+        pass
+    return ""
+
+SRC = os.getenv("MEKAMARU_SOURCE", None) or _detect_source()
+
+# ---- Google 設定 ----
+GCP_CRED = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+GC_VOICE_NAME    = os.getenv("MEKAMARU_GC_VOICE", "ja-JP-Standard-A")
+GC_SPEAKING_RATE = float(os.getenv("MEKAMARU_GC_RATE", "1.0"))
+GC_PITCH         = float(os.getenv("MEKAMARU_GC_PITCH", "0.0"))
+USE_SOX_FX       = (os.getenv("MEKAMARU_TTS_FX", "0") == "1")
+
+GC_PROJECT_NUMBER = os.getenv("MEKAMARU_GC_PROJECT_NUMBER", "1077743802102").strip()
+GC_LOCATION = os.getenv("MEKAMARU_GC_LOCATION", "global").strip()
+
+# 応答最大文字数（最終ハード制限）
+MAX_CHARS = int(os.getenv("MEKAMARU_MAX_CHARS", "180"))
+
+PROFILE_PATH = os.getenv("MEKAMARU_PROFILE", "")
+
+# YouTube（ラッキーマイン=安倍むつき様のチャンネル）
+YOUTUBE_CHANNEL_HANDLE = "https://www.youtube.com/@abemutsuki"
+YOUTUBE_CHANNEL_VIDEOS = "https://www.youtube.com/@abemutsuki/videos"
+
+# 専用Chromium（単一ウインドウ運用）
+CHROME_PROFILE = os.path.join(HOME, ".mekamaru-chrome")
+
+API_KEY = os.getenv("GOOGLE_API_KEY")
+if not API_KEY:
+    print("ERROR: GOOGLE_API_KEY 未設定", file=sys.stderr); sys.exit(1)
+genai.configure(api_key=API_KEY)
+model = genai.GenerativeModel(model_name="gemini-1.5-flash-latest")
+
+# ====== 共通 ======
+def _log(msg: str):
+    # 標準出力にログを即時表示する関数。
+    print(msg, flush=True)
+
+def play_wav(path: str, label: str = "") -> bool:
+    # 指定したwavファイルをaplayで再生する。
+    # labelはログ用のラベル。
+    # 再生成功でTrue、失敗でFalse。
+    if not path or not os.path.exists(path): return False
+    if not shutil.which("aplay"):
+        _log(f"[再生スキップ] aplay 不在: {path}"); return False
+    if label: _log(f'再生「{label}」')
+    subprocess.run(["aplay","-q",path], check=False); return True
+
+def load_profile_text() -> str:
+    # プロフィールテキストファイルを読み込んで返す。
+    # 存在しない場合は空文字。
+    if PROFILE_PATH and os.path.exists(PROFILE_PATH):
+        try:
+            with open(PROFILE_PATH, "r", encoding="utf-8") as f: return f.read().strip()
+        except Exception: pass
+    return ""
+PROFILE_TEXT = load_profile_text()
+
+# ====== TTS ======
+def say_jp(text: str) -> bool:
+    # Google Cloud TTSで日本語テキストを音声合成し再生する。
+    # 成功でTrue、失敗でFalse。
+    try:
+        if not GCP_CRED or not os.path.exists(GCP_CRED):
+            _log("[ERROR] GOOGLE_APPLICATION_CREDENTIALS 未設定/不正"); return False
+        _log(f'もらった命令「{text}」')
+        _log(f'Google Text to Speechで「{text}」を音声にしています。')
+        _log('音声変換中。')
+        client = texttospeech.TextToSpeechClient()
+        inp = texttospeech.SynthesisInput(text=text)
+        voice = texttospeech.VoiceSelectionParams(language_code="ja-JP", name=GC_VOICE_NAME)
+        cfg = texttospeech.AudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.LINEAR16,
+            speaking_rate=GC_SPEAKING_RATE, pitch=GC_PITCH
+        )
+        resp = client.synthesize_speech(input=inp, voice=voice, audio_config=cfg)
+        raw = "/tmp/mekamaru_tts_raw.wav"
+        with open(raw,"wb") as f: f.write(resp.audio_content)
+        play_path = raw
+        if USE_SOX_FX and shutil.which("sox"):
+            fx = "/tmp/mekamaru_tts_fx.wav"
+            if subprocess.run(["sox", raw, fx, "treble","+3","reverb","10"],
+                              capture_output=True, text=True).returncode == 0 and os.path.exists(fx):
+                play_path = fx
+        _log(f'再生「「{text}」」')
+        subprocess.run(["aplay","-q",play_path], check=False)
+        return True
+    except Exception as e:
+        _log(f"[ERROR] Google TTS失敗: {e}"); return False
+
+# ====== 口癖 ======
+CATCH_PHRASE_WAVS = [
+    ("了解", os.path.join(VOICES_DIR,"ryoukai.wav"), lambda s: ("了解" in s) or ("りょうかい" in s)),
+    ("それは無理", os.path.join(VOICES_DIR,"muri.wav"),     lambda s: ("無理" in s) or ("それは無理" in s)),
+]
+def respond(text: str):
+    # 口癖にマッチすればwav再生、そうでなければTTSで応答。
+    s = (text or "").strip()
+    for key, wavp, cond in CATCH_PHRASE_WAVS:
+        if cond(s) and os.path.exists(wavp):
+            _log(f'口癖マッチ「{key}」 → wav再生: {wavp}')
+            if play_wav(wavp, label=key): return
+    # 理解不能な命令時は「それは無理だ」返答＆muri.wav再生
+    if s in ["それは無理だ", "それは無理"] and os.path.exists(os.path.join(VOICES_DIR,"muri.wav")):
+        play_wav(os.path.join(VOICES_DIR,"muri.wav"), label="それは無理")
+        return
+    if not say_jp(s): _log(f"[ERROR] 音声出力失敗: {s}")
+
+# ====== 録音（小刻み） ======
+def record_chunk_wav(path: str, seconds: float) -> bool:
+    # 指定秒数だけマイクから録音しwavファイルに保存。
+    # 成功でTrue、失敗でFalse。
+    if not SRC:
+        _log("[ERROR] MEKAMARU_SOURCE 未設定"); return False
+    if not shutil.which("pw-record"):
+        _log("[ERROR] pw-record 不在"); return False
+    cmd = ["pw-record","--rate",str(RATE),"--channels","1","--target",SRC,path]
+    r = subprocess.run(["bash","-lc", f"timeout {seconds}s " + " ".join(cmd)],
+                       capture_output=True, text=True)
+    return (r.returncode in (0,124)) and os.path.exists(path) and (os.path.getsize(path) > 44)
+
+def read_wav_pcm(path: str) -> bytes:
+    # wavファイルからPCMデータを抽出して返す。
+    # 不正な場合は空bytes。
+    try:
+        with wave.open(path,"rb") as wf:
+            if wf.getnchannels()!=1 or wf.getframerate()!=RATE or wf.getsampwidth()!=2:
+                return b""
+            return wf.readframes(wf.getnframes())
+    except Exception:
+        return b""
+
+def pcm_to_frames(pcm: bytes, frame_ms=20) -> List[bytes]:
+    # PCMデータを指定msごとのフレームに分割してリストで返す。
+    frame_len = int(RATE * (frame_ms/1000.0)) * SAMPLE_WIDTH
+    return [pcm[i:i+frame_len] for i in range(0, len(pcm)-frame_len+1, frame_len)]
+
+# ====== VAD ======
+class Segmenter:
+    # VAD（無音区間検出）で有声区間のみ抽出するクラス。
+    # consume_framesで音声フレームを渡すと有声区間ごとに分割して返す。
+    def __init__(self, vad_mode=VAD_MODE, start_ms=VAD_START_MS, end_ms=VAD_END_MS, silence_ms=VAD_SILENCE_MS, bridging_ms=SEG_BRIDGING_MS):
+        self.vad = webrtcvad.Vad(vad_mode)
+        self.start_need = start_ms
+        self.end_need   = end_ms
+        self.silence_ms = silence_ms
+        self.bridging_ms = bridging_ms
+        self.hangover_frames = int(self.silence_ms / FRAME_MS)
+        self.state = "idle"
+        self.buf = bytearray()
+        self.run_ms = 0
+        self.sil_ms = 0
+    def consume_frames(self, frames: List[bytes]) -> List[bytes]:
+        # VADで有声区間のみ抽出し、区間ごとにbytesリストで返す。
+        segments = []
+        for fr in frames:
+            is_voiced = self.vad.is_speech(fr, RATE)
+            if self.state == "idle":
+                if is_voiced:
+                    self.run_ms += FRAME_MS
+                    if self.run_ms >= self.start_need:
+                        self.state = "run"
+                        self.buf.extend(fr)
+                        self.sil_ms = 0
+                else:
+                    self.run_ms = 0
+            else:
+                self.buf.extend(fr)
+                if is_voiced:
+                    self.sil_ms = 0
+                else:
+                    self.sil_ms += FRAME_MS
+                    if self.sil_ms >= self.end_need:
+                        segments.append(bytes(self.buf))
+                        self.state = "idle"
+                        self.buf = bytearray()
+                        self.run_ms = 0
+                        self.sil_ms = 0
+        return segments  # 必ずリストを返す
+
+# ====== WAV書き出し ======
+def write_wav_from_pcm(path: str, pcm: bytes):
+    # PCMデータをwavファイルとして保存する。
+    with wave.open(path,"wb") as wf:
+        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(RATE)
+        wf.writeframes(pcm)
+
 # ====== STT v2 ======
 def _recognizer_path() -> str:
     # Google STT v2用のrecognizerパスを生成。
@@ -640,64 +897,46 @@ def handle_custom_commands(text: str) -> bool:
 
 # ====== メイン ======
 def main():
-    # メインループ。
-    # マイク入力→VAD→STT→コマンド解析→応答生成→音声出力の流れ。
-    # Ctrl+Cで終了。
     if not play_wav(START_WAV, label="起動音"):
         respond("起動しました。マイクを待機します。")
-    seg = Segmenter(vad_mode=VAD_MODE, start_ms=VAD_START_MS, end_ms=VAD_END_MS, silence_ms=VAD_SILENCE_MS, bridging_ms=SEG_BRIDGING_MS)
+    seg = Segmenter(vad_mode=VAD_MODE, start_ms=VAD_START_MS, end_ms=VAD_END_MS,
+                    silence_ms=VAD_SILENCE_MS, bridging_ms=SEG_BRIDGING_MS)
     _log("[OKメカ丸] 常時リスニング開始（VADで有声区間のみ送信）")
     try:
         while True:
             tmp = "/tmp/chunk.wav"
+            if not SRC:
+                _log("[ERROR] MEKAMARU_SOURCE 未設定（自動検出にも失敗）"); time.sleep(1); continue
             if not record_chunk_wav(tmp, CHUNK_SEC):
-                try:
-                    client = speech.SpeechClient()
-                    with open(tmp,"rb") as f: content = f.read()
-                    cfg = {
-                        "auto_decoding_config": {},
-                        "language_codes": ["ja-JP"],
-                        "model": "latest_short",
-                        "features": {"enable_automatic_punctuation": True},
-                        "single_utterance": bool(STT_SINGLE_UTTERANCE),
-                    }
-                    req = speech.RecognizeRequest(
-                        recognizer=_recognizer_path(),
-                        config=cfg,
-                        content=content,
-                    )
-                    resp = client.recognize(request=req)
-                    cand = []
-                    for r in resp.results:
-                        if r.alternatives: cand.append(r.alternatives[0].transcript)
-                    return " ".join(cand).strip()
-                except Exception as e:
-                    _log(f"[STT v2 ERROR] {e}")
-                    return ""
+                continue
+            pcm = read_wav_pcm(tmp)
+            if not pcm:
+                continue
+            frames = pcm_to_frames(pcm, FRAME_MS)
+            segments = seg.consume_frames(frames)
+            for seg_pcm in segments:
+                text = stt_from_pcm(seg_pcm)
+                _log(f"[SEG STT] {text}")
+                if not text:
+                    continue
+                if handle_custom_commands(text):
+                    continue
+                calc = try_calc_result(text)
+                if calc:
+                    respond(calc); continue
+                trig, rest = extract_after_ok(text)
                 if not trig:
-                    _log("[INFO] トリガー外")
-                    continue
+                    _log("[INFO] トリガー外"); continue
                 _log(f'[抽出] OK以降: 「{rest}」')
-                if not rest:
-                    respond("はい。")
-                    continue
-
-                # 4) “OK以降” にも計算や直命令が含まれる場合を再チェック
                 if handle_custom_commands(rest):
                     continue
                 calc2 = try_calc_result(rest)
                 if calc2:
-                    respond(calc2)
-                    continue
-
-                # 5) 通常はAIへ → 短文化 → 発話
+                    respond(calc2); continue
                 _log(f'命令受領「{rest}」')
                 ai = mekamaru_ai_reply(rest)
                 _log(f"[AI] {ai}")
-                if not ai:
-                    respond("それは無理だ")
-                else:
-                    respond(ai)
+                respond(ai if ai else "それは無理だ")
     except KeyboardInterrupt:
         if not play_wav(EXIT_WAV, label="終了音"):
             respond("終了します。")
